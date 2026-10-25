@@ -1,0 +1,79 @@
+# Hourly scrape of the idyclub movie digest, published to GitHub Pages.
+# The deploy job runs only after the feed parses as RSS with real items.
+# A failed scrape therefore leaves the previous Pages deployment in place.
+name: Publish RSS feed
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate feed
+        run: |
+          mkdir -p site
+          python3 make_feed.py -o site/feed.xml
+
+      - name: Validate feed
+        run: |
+          python3 - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          path = "site/feed.xml"
+          try:
+              root = ET.parse(path).getroot()
+          except ET.ParseError as exc:
+              sys.exit(f"refusing to publish: feed is not well-formed XML ({exc})")
+          if root.tag != "rss":
+              sys.exit(f"refusing to publish: root is {root.tag!r}, expected 'rss'")
+          items = root.findall("./channel/item")
+          if not items:
+              sys.exit("refusing to publish: feed has no items")
+          for n, item in enumerate(items, 1):
+              title = (item.findtext("title") or "").strip()
+              link = (item.findtext("link") or "").strip()
+              if not title or not link.startswith("https://www.idyclub.com/read-"):
+                  sys.exit(f"refusing to publish: item {n} has no title or an unexpected link")
+          print(f"feed ok: {len(items)} items")
+          PY
+
+      - name: Add index page
+        run: cp index.html site/index.html
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
